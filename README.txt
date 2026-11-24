@@ -18,8 +18,8 @@
 Склонируйте репозиторий и перейдите в его папку:
 
 ```bash
-git clone <адрес-репозитория>
-cd <папка-репозитория>
+git clone https://github.com/itDager1/rezonanse.git
+cd rezonanse
 ```
 
 Проверка справки и тестов:
@@ -40,7 +40,7 @@ python -m unittest discover -s tests -v
 3. Запустите проверку:
 
    ```bash
-   python main.py check --input examples/test_vacancies.json --provider gigachat --output reports/check-gigachat.json
+   python main.py check --input examples/kantkod_sample_vacancies.json --provider gigachat --output reports/check-gigachat.json
    ```
 
 Используется модель GigaChat-2 через API GigaChat. TLS-проверка включена. Если система не доверяет сертификату сервиса, укажите путь к доверенному PEM-файлу в `GIGACHAT_CA_BUNDLE`; не выключайте проверку сертификатов. При отсутствии действующего ключа или сети программа сообщит об ошибке. Получение данных идёт только по нужным для анализа полям; итоговый вывод модели всё равно нужно проверять.
@@ -60,14 +60,14 @@ python -m unittest discover -s tests -v
 4. В папке проекта выполните:
 
    ```bash
-   python main.py check --input examples/test_vacancies.json --provider ollama --output reports/check.json
+   python main.py check --input examples/kantkod_sample_vacancies.json --provider ollama --output reports/check.json
    ```
 
-5. Откройте `reports/check.json`. Сервис выводит номер вакансии и число принятых замечаний от модели. Чтобы проверить свой набор, подставьте путь к своему JSON вместо `examples/test_vacancies.json`.
+5. Откройте `reports/check.json`. Сервис выводит номер вакансии и число принятых замечаний от модели. Чтобы проверить свой набор, подставьте путь к своему JSON вместо `examples/kantkod_sample_vacancies.json`.
 
 Модель `qwen2.5:1.5b` занимает около 1 ГБ на диске, также нужен запас оперативной памяти. Скорость зависит от компьютера. Переменные `OLLAMA_MODEL`, `OLLAMA_BASE_URL` и `AI_TIMEOUT` позволяют выбрать другую совместимую модель, адрес и тайм-аут. Использование ИИ обязательно: если сервер или модель недоступны либо ответ нельзя разобрать, программа сообщает об ошибке и не выдаёт запуск одних правил за успешную проверку с ИИ.
 
-`examples/test_vacancies.json` — искусственный пример команды, содержащий вымышленные вакансии и адреса. Учебный JSON организаторов на момент подготовки нам не передавался; после его получения можно передать его в `--input` и сформировать требуемый пример отчёта. Формат входа: объект с массивом `results.vacancies`, либо `vacancies`, либо сам массив; каждый элемент — вакансия или объект-обёртка `vacancy`.
+`examples/kantkod_sample_vacancies.json` — учебный набор организаторов с 10 вакансиями. Команда проверки анализирует весь файл без обращения к порталу. Также можно передать свой JSON: объект с массивом `results.vacancies`, либо `vacancies`, либо сам массив; каждый элемент — вакансия или объект-обёртка `vacancy`.
 
 ## Рабочий запуск и расписание
 
@@ -111,7 +111,7 @@ python main.py schedule --provider gigachat --time 09:00
 ]
 ```
 
-`id` — ID вакансии; `url` — ссылка при наличии, иначе `null`; `findings` — список замечаний или `[]`. В замечании `topic` — тема, `field` — путь к полю исходной вакансии без внешней обёртки `vacancy`, `quote` — исходная цитата или значение, `problem` — суть проблемы, `recommendation` — конкретное уточнение. Для пропуска `quote` пустая; при противоречии указаны оба поля и оба значения. Пример `examples/test_report.json` сформирован с Ollama на искусственных данных `examples/test_vacancies.json`; результат модели может незначительно меняться между запусками.
+`id` — ID вакансии; `url` — ссылка при наличии, иначе `null`; `findings` — список замечаний или `[]`. В замечании `topic` — тема, `field` — путь к полю исходной вакансии без внешней обёртки `vacancy`, `quote` — исходная цитата или значение, `problem` — суть проблемы, `recommendation` — конкретное уточнение. Для пропуска `quote` пустая; при противоречии указаны оба поля и оба значения. Пример `examples/kantkod_sample_report.json` сформирован с GigaChat на учебном наборе организаторов `examples/kantkod_sample_vacancies.json`; результат модели может незначительно меняться между запусками.
 
 ## Состав команды и вклад
 

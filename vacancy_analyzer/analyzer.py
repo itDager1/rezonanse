@@ -152,6 +152,95 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _experience_inconsistency(vacancy: dict, context: dict) -> dict | None:
+    """Сопоставить указанное значение опыта и явное минимальное требование."""
+    req = vacancy.get("requirement")
+    if not isinstance(req, dict) or "experience" not in req:
+        return None
+    raw = req["experience"]
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        return None
+    try:
+        structured = float(str(raw).strip().replace(",", "."))
+    except ValueError:
+        return None
+    if structured != 0:
+        return None
+    pattern = re.compile(r"(?:не\s+менее|не\s+меньше|минимум|от)\s+(\d+)\s*(?:лет|года|год)\w*\s+(?:опыта|стажа)", re.I)
+    for record in context["description"]:
+        value = _plain(record["value"])
+        match = pattern.search(value)
+        if (match and int(match.group(1)) > 0
+                and not re.search(r"(?:не\s+требу\w*|не\s+обязател\w*)", value[match.end():match.end()+35], re.I)
+                and not re.search(r"(?:не\s+требу\w*|не\s+обязател\w*)\s*$", value[max(0, match.start()-40):match.start()], re.I)):
+            return _finding("требования", f"requirement.experience, {record['field']}",
+                f"{raw}; {record['value']}",
+                "В структурированном поле опыта указано 0, а в тексте требуется опыт; значения требуют сверки.",
+                "Уточните, какой минимальный опыт действительно требуется, и согласуйте оба поля.")
+    return None
+
+
+def _workplace_inconsistency(context: dict) -> dict | None:
+    """Выявить только явное противопоставление полностью дистанционной и обязательной офисной работы."""
+    records = context["fields"]["место работы"] + context["description"]
+    remote = re.compile(r"(?:полностью|исключительно|только)\s+(?:удал[её]нн\w*|дистанционн\w*)|(?:удал[её]нн\w*|дистанционн\w*)\s+(?:работ\w*\s+)?(?:из\s+любого\s+города|без\s+посещени\w*\s+офиса)", re.I)
+    office = re.compile(r"\b(?:обязательн\w*|ежедневн\w*)[^.!?\n]{0,90}(?:присутстви\w*|работ\w*|приход\w*|нахождени\w*)[^.!?\n]{0,90}(?:в\s+офис\w*|офис\w*)", re.I)
+    distant = next((r for r in records if remote.search(_plain(r["value"]))), None)
+    present = None
+    for record in records:
+        value = _plain(record["value"])
+        match = office.search(value)
+        if match and not re.search(r"(?:не\s+(?:требу\w*|предусматрива\w*)\s+|не\s+|без\s+)$", value[max(0, match.start()-40):match.start()], re.I):
+            present = record
+            break
+    if distant and present:
+        # Two explicitly offered alternatives do not establish a contradiction.
+        if any(re.search(r"(?:по\s+выбору\s+(?:сотрудника|работника|кандидата)|(?:удал[её]нн\w*|дистанционн\w*)[^.!?\n]{0,90}\s(?:или|либо)\s[^.!?\n]{0,90}офис)", _plain(r["value"]), re.I) for r in records):
+            return None
+        return _finding("место работы", f"{distant['field']}, {present['field']}",
+            f"{distant['value']}; {present['value']}",
+            "Полностью дистанционная работа и обязательное ежедневное присутствие в офисе описаны одновременно.",
+            "Уточните, где выполняется работа и требуется ли посещение офиса, затем согласуйте условия.")
+    return None
+
+
+def _has_specific_workplace(context: dict) -> bool:
+    """Полный адрес либо явно указанный дистанционный формат уже есть в другом поле."""
+    records = context["fields"]["место работы"] + context["description"]
+    for record in records:
+        value = _plain(record["value"])
+        if re.search(r"(?:\bул\.|\bулиц\w*|\bпроспект\w*|\bпр-т\b|\bпереул\w*|\bшоссе\b|\bплощад\w*|\bд\.\s*\d)", value, re.I):
+            return True
+        if re.search(r"(?:полностью|исключительно|только)\s+(?:удал[её]нн\w*|дистанционн\w*)|(?:работа|занятость)\s+(?:удал[её]нно|дистанционно)", value, re.I):
+            return True
+    return False
+
+
+def _schedule_inconsistency(context: dict) -> dict | None:
+    """Сопоставить явно названные схемы рабочих смен в разных полях."""
+    scheme = re.compile(r"(?<!\d)([1-7])\s*/\s*([1-7])(?!\d)")
+    named = re.compile(r"(?:график\w*|схем\w*\s+(?:смен\w*|работ\w*)|режим\w*\s+работ\w*)[^.!?\n]{0,50}?([1-7])\s*/\s*([1-7])(?!\d)", re.I)
+    for source in context["fields"]["график"]:
+        initial = scheme.search(_plain(source["value"]))
+        if not initial:
+            continue
+        initial_value = initial.groups()
+        for description in context["description"]:
+            text = _plain(description["value"])
+            match = named.search(text)
+            if not match or match.groups() == initial_value:
+                continue
+            # Если исходная схема прямо указана и в этом тексте, не утверждаем
+            # противоречие: это могут быть альтернативные или переходные режимы.
+            if initial_value in [m.groups() for m in scheme.finditer(text)]:
+                continue
+            return _finding("график", f"{source['field']}, {description['field']}",
+                f"{source['value']}; {description['value']}",
+                "В структурированном поле и описании указаны разные схемы графика.",
+                "Уточните правильную схему рабочих и выходных дней и согласуйте поля.")
+    return None
+
+
 def _has_salary_amount(records: list[dict[str, str]]) -> bool:
     """Оценить наличие суммы именно оплаты, а не любого числа в описании.
 
@@ -222,6 +311,10 @@ def analyze_vacancy(entry: dict, ai_findings: list | None = None) -> dict:
             "Минимальная оплата больше максимальной: указанные границы противоречат друг другу.",
             "Уточните правильные нижнюю и верхнюю границы оплаты."))
 
+    for finding in (_experience_inconsistency(vacancy, context), _workplace_inconsistency(context), _schedule_inconsistency(context)):
+        if finding:
+            findings.append(finding)
+
     schedule_records = _useful_fields(context, "график") + _desc_for(context, "график")
     flexible = next((r for r in schedule_records if re.search(r"гибк\w*\s+график", _plain(r["value"]), re.I)), None)
     schedule_evidence = context["fields"]["график"] + context["description"]
@@ -229,6 +322,53 @@ def analyze_vacancy(entry: dict, ai_findings: list | None = None) -> dict:
         findings.append(_finding("график", flexible["field"], flexible["value"],
             "Указан гибкий график, но конкретные дни, смены или часы не уточнены.",
             "Уточните возможные рабочие дни, длительность смен и часы работы."))
+
+    shift = next((r for r in schedule_records if re.search(r"сменн\w*\s+график", _plain(r["value"]), re.I)), None)
+    if shift and not any(_specific_schedule(r["value"]) for r in schedule_evidence):
+        findings.append(_finding("график", shift["field"], shift["value"],
+            "Указан сменный график, но порядок и время смен не уточнены.",
+            "Уточните чередование смен, их продолжительность и время начала и окончания."))
+
+    for record in _useful_fields(context, "обязанности"):
+        match = re.search(r"(?:другие|прочие|различные|разные)\s+(?:задачи|поручения|обязанности)\s+по\s+необходимости", record["value"], re.I)
+        if match:
+            findings.append(_finding("обязанности", record["field"], match.group(),
+                "Дополнительные задачи обозначены без уточнения их характера.",
+                "Уточните, какие дополнительные задачи могут входить в обязанности."))
+            break
+
+    # Не подменять подробное описание обязанностей в другом поле требованием повторить его здесь.
+    duty_records = _useful_fields(context, "обязанности")
+    vague_duty = re.compile(r"^\s*(?:выполнени\w*\s+)?(?:различных|разнообразных|разных|прочих)\s+(?:поручений|задач)(?:\s+руководителя)?\s*[.!]?\s*$", re.I)
+    for record in duty_records:
+        if vague_duty.match(_plain(record["value"])):
+            other_detail = any(r["field"] != record["field"] and not vague_duty.match(_plain(r["value"])) for r in duty_records)
+            other_detail = other_detail or any(r["field"] != record["field"] for r in _desc_for(context, "обязанности"))
+            if not other_detail:
+                findings.append(_finding("обязанности", record["field"], record["value"],
+                    "Обязанности описаны общими поручениями без перечисления конкретных задач.",
+                    "Уточните основные задачи сотрудника и виды поручений."))
+            break
+
+    # Само по себе короткое название не ошибка: требуем уточнение, только когда и
+    # обязанности формулируются столь же неопределённо, а специальность нигде не раскрыта.
+    titles = _useful_fields(context, "должность")
+    generic = next((r for r in titles if re.fullmatch(r"\s*специалист\s*", _plain(r["value"]), re.I)), None)
+    unclear_duties = any(f["topic"] == "обязанности" for f in findings)
+    specialty = any(r["field"] != generic["field"] and _meaningful(r["value"], "должность") for r in titles) if generic else False
+    specialty = specialty or any(re.search(r"(?:специалист\w*\s+(?:по|в\s+области)\s+\S+|должность\s*[:—-]\s*\S+)", _plain(r["value"]), re.I) for r in context["description"])
+    if generic and unclear_duties and not specialty:
+        findings.append(_finding("должность", generic["field"], generic["value"],
+            "Название должности не раскрывает специализацию, а обязанности описаны общими словами.",
+            "Уточните направление работы и название должности."))
+
+    if not _has_specific_workplace(context):
+        for record in context["description"]:
+            if re.search(r"(?:адрес|формат|место)\s+(?:и\s+адрес\s+)?(?:рабочего\s+места\s+|работы\s+)?(?:уточня\w*|обсужда\w*)", _plain(record["value"]), re.I):
+                findings.append(_finding("место работы", record["field"], record["value"],
+                    "Формат или адрес рабочего места предлагается уточнить позже, конкретного адреса или дистанционного формата нет.",
+                    "Уточните адрес работы или явно укажите дистанционный формат."))
+                break
 
     pay_records = _useful_fields(context, "оплата") + _desc_for(context, "оплата")
     vague_pay = next((r for r in pay_records if re.search(r"по договор[её]нности|обсужда\w*|по результатам собеседован|достойн\w*|конкурент\w*", _plain(r["value"]), re.I)), None)

@@ -175,6 +175,123 @@ class AnalyzerTest(unittest.TestCase):
         self.assertEqual(len(findings), 2)
         self.assertIn(ai_finding, findings)
 
+    def test_experience_value_zero_and_five_year_requirement_both_reported(self):
+        item = complete_vacancy()
+        item["requirement"]["qualification"] = "Требуется не менее 5 лет опыта работы аналитиком данных."
+        result = analyze_vacancy(item)["findings"]
+        issue, = [f for f in result if f["topic"] == "требования"]
+        self.assertIn("requirement.experience", issue["field"])
+        self.assertIn("requirement.qualification", issue["field"])
+        self.assertIn("0", issue["quote"])
+        self.assertIn(item["requirement"]["qualification"], issue["quote"])
+
+    def test_experience_zero_and_optional_experience_is_not_contradiction(self):
+        item = complete_vacancy()
+        item["requirement"]["qualification"] = "Опыт не обязателен."
+        self.assertEqual(analyze_vacancy(item)["findings"], [])
+        item["requirement"]["qualification"] = "Не менее 5 лет опыта не требуется."
+        self.assertEqual(analyze_vacancy(item)["findings"], [])
+
+    def test_explicit_remote_vs_daily_office_has_both_sources(self):
+        item = complete_vacancy()
+        item["duty"] += ". Работа полностью дистанционная из любого города."
+        item["requirement"]["qualification"] = "Обязательное ежедневное присутствие в офисе в Калининграде к 09:00."
+        issue, = [f for f in analyze_vacancy(item)["findings"] if f["topic"] == "место работы"]
+        self.assertIn("duty", issue["field"])
+        self.assertIn("requirement.qualification", issue["field"])
+        self.assertIn(item["duty"], issue["quote"])
+        self.assertIn(item["requirement"]["qualification"], issue["quote"])
+
+    def test_remote_without_required_office_does_not_create_contradiction(self):
+        item = complete_vacancy()
+        item["duty"] += ". Работа полностью дистанционная из любого города."
+        item["requirement"]["qualification"] = "Не требуется обязательное присутствие в офисе."
+        self.assertNotIn("место работы", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+
+    def test_hybrid_work_is_not_claimed_to_be_fully_remote(self):
+        item = complete_vacancy()
+        item["duty"] += ". Дистанционная работа возможна по согласованию."
+        item["requirement"]["qualification"] = "Обязательное ежедневное присутствие в офисе."
+        self.assertNotIn("место работы", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+        item["duty"] = "Полностью дистанционная работа или обязательное присутствие в офисе по выбору сотрудника."
+        self.assertNotIn("место работы", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+
+    def test_shift_schedule_without_detail_has_actionable_finding(self):
+        item = complete_vacancy()
+        item["schedule"] = "Сменный график"
+        issue, = analyze_vacancy(item)["findings"]
+        self.assertEqual(issue["topic"], "график")
+        self.assertEqual(issue["quote"], "Сменный график")
+        item["requirement"]["qualification"] = "Смены 2/2 с 08:00 до 20:00."
+        self.assertEqual(analyze_vacancy(item)["findings"], [])
+
+    def test_unspecified_other_duties_quote_original(self):
+        item = complete_vacancy()
+        item["duty"] = "Работа с документами и другие задачи по необходимости."
+        issue, = analyze_vacancy(item)["findings"]
+        self.assertEqual(issue["topic"], "обязанности")
+        self.assertEqual(issue["field"], "duty")
+        self.assertEqual(issue["quote"], "другие задачи по необходимости")
+
+    def test_vague_director_tasks_and_generic_specialist_name(self):
+        item = complete_vacancy()
+        item["duty"] = "Выполнение различных поручений руководителя."
+        issue, = analyze_vacancy(item)["findings"]
+        self.assertEqual((issue["topic"], issue["quote"]), ("обязанности", item["duty"]))
+        item["job-name"] = "Специалист"
+        topics = [f["topic"] for f in analyze_vacancy(item)["findings"]]
+        self.assertIn("должность", topics)
+        self.assertIn("обязанности", topics)
+
+    def test_duty_details_elsewhere_do_not_require_repeat(self):
+        item = complete_vacancy()
+        item["job-name"] = "Специалист"
+        item["duty"] = "Выполнение различных поручений руководителя."
+        item["description"] = "Должность: специалист по документообороту. Обязанности: ведение архива и обработка входящих писем."
+        self.assertEqual(analyze_vacancy(item)["findings"], [])
+
+    def test_specific_job_elsewhere_prevents_generic_title_finding(self):
+        item = complete_vacancy()
+        item["job-name"] = "Специалист"
+        item["duty"] = "Работа с документами и другие задачи по необходимости."
+        item["description"] = "Должность: специалист по кадрам."
+        topics = [f["topic"] for f in analyze_vacancy(item)["findings"]]
+        self.assertNotIn("должность", topics)
+        self.assertIn("обязанности", topics)
+
+    def test_workplace_deferred_with_only_city_needs_clarification(self):
+        item = complete_vacancy()
+        item["addresses"]["address"][0]["location"] = "г. Калининград"
+        item["requirement"]["qualification"] = "Формат и адрес рабочего места уточняются при собеседовании."
+        issue, = [f for f in analyze_vacancy(item)["findings"] if f["topic"] == "место работы"]
+        self.assertEqual(issue["field"], "requirement.qualification")
+        self.assertEqual(issue["quote"], item["requirement"]["qualification"])
+
+    def test_workplace_deferred_does_not_override_real_address_or_remote_format(self):
+        item = complete_vacancy()
+        item["requirement"]["qualification"] = "Формат и адрес рабочего места уточняются при собеседовании."
+        self.assertNotIn("место работы", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+        item["addresses"]["address"][0]["location"] = "г. Калининград"
+        item["description"] = "Работа полностью дистанционная."
+        self.assertNotIn("место работы", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+
+    def test_conflicting_shift_schemes_show_both_source_values(self):
+        item = complete_vacancy()
+        item["schedule"] = "2/2"
+        item["description"] = "График работы 5/2."
+        issue, = [f for f in analyze_vacancy(item)["findings"] if f["topic"] == "график"]
+        self.assertEqual(issue["field"], "schedule, description")
+        self.assertEqual(issue["quote"], "2/2; График работы 5/2.")
+
+    def test_repeated_shift_scheme_and_unrelated_fraction_are_not_contradictions(self):
+        item = complete_vacancy()
+        item["schedule"] = "2/2"
+        for value in ("График работы 2/2.", "Отчёт за 5/2 предоставляется руководителю.",
+                      "График работы 5/2 или 2/2 по выбору."):
+            with self.subTest(value=value):
+                item["description"] = value
+                self.assertNotIn("график", [f["topic"] for f in analyze_vacancy(item)["findings"]])
+
 
 if __name__ == "__main__":
     unittest.main()
