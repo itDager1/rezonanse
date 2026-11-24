@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+reports/
+*.tmp
+План_работы.md
+Инструкция_для_видео_и_сдачи.md
