@@ -1,7 +1,34 @@
+import ssl
+import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
 from unittest.mock import patch
 
-from vacancy_analyzer.ai import AIAnalyzer, AIError, _extract_issues, validate_findings
+from vacancy_analyzer.ai import AIAnalyzer, AIError, _extract_issues, _read_json_response, validate_findings
+
+# Public root certificate used only as valid test input; no key material is included.
+TEST_CERT_PEM = """-----BEGIN CERTIFICATE-----
+MIIDIzCCAqigAwIBAgIQFJgmZtx8zY9AU2d7uZnshTAKBggqhkjOPQQDAzCBlDEL
+MAkGA1UEBhMCVVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1v
+bmQxHjAcBgNVBAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjE+MDwGA1UEAxM1TWlj
+cm9zb2Z0IEVDQyBQcm9kdWN0IFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IDIw
+MTgwHhcNMTgwMjI3MjA0MjA4WhcNNDMwMjI3MjA1MDQ2WjCBlDELMAkGA1UEBhMC
+VVMxEzARBgNVBAgTCldhc2hpbmd0b24xEDAOBgNVBAcTB1JlZG1vbmQxHjAcBgNV
+BAoTFU1pY3Jvc29mdCBDb3Jwb3JhdGlvbjE+MDwGA1UEAxM1TWljcm9zb2Z0IEVD
+QyBQcm9kdWN0IFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IDIwMTgwdjAQBgcq
+hkjOPQIBBgUrgQQAIgNiAATHERYqdh1Wjr65YmXUw8608MMw7I9t1245vMhJq6u4
+40N41YEGXe/HfZ/O1rOQdd4MsJDeI7rI0T5n4BmpG4YxHl80Le4X/RX7fieKMqHq
+yY/JfhjLLzssSHp9pvQBB6yjgbwwgbkwDgYDVR0PAQH/BAQDAgGGMA8GA1UdEwEB
+/wQFMAMBAf8wHQYDVR0OBBYEFEPvcIe4nb/siBncxsRrdQ11NDMIMBAGCSsGAQQB
+gjcVAQQDAgEAMGUGA1UdIAReMFwwBgYEVR0gADBSBgwrBgEEAYI3TIN9AQEwQjBA
+BggrBgEFBQcCARY0aHR0cDovL3d3dy5taWNyb3NvZnQuY29tL3BraW9wcy9Eb2Nz
+L1JlcG9zaXRvcnkuaHRtADAKBggqhkjOPQQDAwNpADBmAjEAocBJRF0yVSfMPpBu
+JSKdJFubUTXHkUlJKqP5b08czd2c4bVXyZ7CIkWbBhVwHEW/AjEAxdMo63LHPrCs
+Jwl/Yj1geeWS8UUquaUC5GC7/nornGCntZkU8rC+8LsFllZWj8Fo
+-----END CERTIFICATE-----
+"""
 
 
 class AIValidationTests(unittest.TestCase):
@@ -210,6 +237,55 @@ class AIValidationTests(unittest.TestCase):
     def test_missing_credentials_cannot_silently_fall_back(self):
         with self.assertRaises(AIError):
             AIAnalyzer("gigachat", credentials="")
+
+    def test_ollama_ignores_missing_gigachat_certificate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "missing.crts")
+            model = AIAnalyzer("ollama", ca_bundle=missing)
+        self.assertEqual(model.provider, "ollama")
+        self.assertIsNone(model.ssl_context)
+
+    def test_gigachat_missing_certificate_explains_path_and_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / "сертификат.crts")
+            with self.assertRaisesRegex(AIError, "не найден.*расширение"):
+                AIAnalyzer("gigachat", credentials="dummy", ca_bundle=missing)
+
+    def test_gigachat_invalid_certificate_reports_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            invalid = Path(tmp) / "certificate.crt"
+            invalid.write_text("not a certificate", encoding="utf-8")
+            with self.assertRaisesRegex(AIError, "PEM или DER"):
+                AIAnalyzer("gigachat", credentials="dummy", ca_bundle=str(invalid))
+
+    def test_gigachat_accepts_pem_and_der_on_unicode_paths_with_tls_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "Сертификаты"; folder.mkdir()
+            pem = folder / "корень.crt"
+            der = folder / "другой.crt"
+            pem.write_bytes(b"\xef\xbb\xbf" + TEST_CERT_PEM.encode("ascii"))
+            der.write_bytes(ssl.PEM_cert_to_DER_cert(TEST_CERT_PEM))
+            for path in (pem, der):
+                with self.subTest(path=path.name):
+                    model = AIAnalyzer("gigachat", credentials="dummy", ca_bundle=str(path))
+                    self.assertTrue(model.ssl_context.check_hostname)
+                    self.assertEqual(model.ssl_context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_gigachat_tls_verification_error_reports_certificate_guidance(self):
+        request = urllib.request.Request("https://example.org/")
+        failure = urllib.error.URLError(ssl.SSLCertVerificationError(1, "test verification failure"))
+        with patch("vacancy_analyzer.ai.urllib.request.urlopen", side_effect=failure):
+            with self.assertRaisesRegex(AIError, "проверить TLS-сертификат.*README"):
+                _read_json_response(request, timeout=1, context=None, service="GigaChat")
+
+    def test_gigachat_network_failure_does_not_claim_certificate_problem(self):
+        request = urllib.request.Request("https://example.org/")
+        failure = urllib.error.URLError(ConnectionRefusedError("test connection refused"))
+        with patch("vacancy_analyzer.ai.urllib.request.urlopen", side_effect=failure):
+            with self.assertRaises(AIError) as error:
+                _read_json_response(request, timeout=1, context=None, service="GigaChat")
+        self.assertIn("ошибка соединения", str(error.exception))
+        self.assertNotIn("сертификат", str(error.exception))
 
     def test_retry_is_bounded_and_succeeds_only_after_real_response(self):
         model = AIAnalyzer("ollama")

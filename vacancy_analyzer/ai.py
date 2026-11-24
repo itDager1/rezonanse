@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import re
 import ssl
 import time
@@ -58,8 +59,13 @@ def _read_json_response(request: urllib.request.Request, *, timeout: float, cont
         # Тело ответа может содержать пользовательские данные, поэтому не выводим его.
         raise AIError(f"{service}: сервер ответил HTTP {exc.code}. Проверьте настройки и доступ к модели.") from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        hint = " Проверьте сеть, сервер и доверенные TLS-сертификаты." if service == "GigaChat" else " Проверьте, запущен ли Ollama и загружена ли модель."
-        raise AIError(f"{service}: ошибка соединения или TLS.{hint}") from None
+        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        if service == "GigaChat" and isinstance(cause, ssl.SSLCertVerificationError):
+            raise AIError("GigaChat: не удалось проверить TLS-сертификат сервера. Проверьте доверенные сертификаты по инструкции в README.") from None
+        if service == "GigaChat" and isinstance(cause, ssl.SSLError):
+            raise AIError("GigaChat: ошибка защищённого TLS-соединения. Проверьте сеть и настройки сертификатов по инструкции в README.") from None
+        hint = " Проверьте сеть, VPN и доступность сервиса." if service == "GigaChat" else " Проверьте, запущен ли Ollama и загружена ли модель."
+        raise AIError(f"{service}: ошибка соединения.{hint}") from None
     except (UnicodeError, json.JSONDecodeError, ValueError):
         raise AIError(f"{service}: сервер вернул некорректный JSON.") from None
 
@@ -281,12 +287,28 @@ class AIAnalyzer:
         self.timeout = timeout
         self._token = ""
         self._token_expiry = 0.0
-        try:
-            self.ssl_context = ssl.create_default_context()
+        self.ssl_context = None
+        if provider == "gigachat":
+            try:
+                self.ssl_context = ssl.create_default_context()
+            except (OSError, ssl.SSLError):
+                raise AIError("Не удалось загрузить системные доверенные сертификаты TLS.") from None
             if ca_bundle:
-                self.ssl_context.load_verify_locations(cafile=ca_bundle)
-        except (OSError, ssl.SSLError):
-            raise AIError("Не удалось загрузить файл доверенного сертификата GIGACHAT_CA_BUNDLE.") from None
+                try:
+                    # Python открывает путь с кириллицей; OpenSSL получает содержимое,
+                    # поэтому не зависит от кодировки имени файла в Windows.
+                    certificate = Path(ca_bundle).read_bytes()
+                except FileNotFoundError:
+                    raise AIError("Файл GIGACHAT_CA_BUNDLE не найден. Проверьте полный путь и точное имя файла, включая расширение.") from None
+                except OSError:
+                    raise AIError("Не удалось прочитать файл GIGACHAT_CA_BUNDLE. Проверьте путь и разрешение на чтение.") from None
+                try:
+                    # PEM может быть с расширением .crt или .pem; бинарный DER тоже допустим.
+                    certificate_data = (certificate.decode("utf-8-sig")
+                        if b"-----BEGIN CERTIFICATE-----" in certificate else certificate)
+                    self.ssl_context.load_verify_locations(cadata=certificate_data)
+                except (TypeError, ValueError, UnicodeError, ssl.SSLError):
+                    raise AIError("Файл GIGACHAT_CA_BUNDLE не содержит корректный сертификат PEM или DER. Проверьте формат файла.") from None
         if provider == "gigachat" and not self.credentials:
             raise AIError("Не задан GIGACHAT_CREDENTIALS в окружении или .env.")
 
